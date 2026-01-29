@@ -1,0 +1,75 @@
+[project]
+  name = "wago-extractor"
+  version = "1.0.0"
+  description = "Extract and filter WoW DB2 data (Consumables, Weapons, Armor) from Wago.tools"
+  readme = "README.md"
+  requires-python = ">=3.10"
+  license = {text = "MIT"}
+  authors = [
+    {name = "jimsemara", email = "0711buck@gmail.com"}
+  ]
+  keywords = ["wow", "world-of-warcraft", "wago", "data-extraction", "lua"]
+  classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12"
+  ]
+
+  dependencies = [
+    "requests>=2.31.0",
+    "rich>=13.0.0"
+  ]
+
+  [project.optional-dependencies]
+    dev = [
+      "pytest>=7.4.0",
+      "pytest-cov>=4.1.0",
+      "ruff>=0.1.0",
+      "mypy>=1.5.0"
+    ]
+
+  [project.scripts]
+    wago-extract = "wago_extractor.cli:main"
+
+[build-system]
+  requires = ["hatchling"]
+  build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+  packages = ["wago_extractor"]
+
+[tool.ruff]
+  line-length = 100
+  target-version = "py310"
+
+  [tool.ruff.lint]
+    # E/W: pycodestyle, F: Pyflakes, I: isort, N: pep8-naming, UP: pyupgrade
+    select = ["E", "F", "I", "N", "W", "UP"]
+    ignore = []
+
+  [tool.ruff.format]
+    quote-style = "double"
+    indent-style = "space"
+    skip-magic-trailing-comma = false
+
+[tool.mypy]
+  python_version = "3.10"
+  warn_return_any = true
+  warn_unused_configs = true
+  disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+  testpaths = ["tests"]
+  python_files = ["test_*.py"]
+
+[dependency-groups]
+  dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "types-requests>=2.32.4.20260107",
+]
