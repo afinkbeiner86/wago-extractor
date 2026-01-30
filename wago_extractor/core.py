@@ -157,7 +157,7 @@ class WagoExtractor:
         Returns:
             Denormalized item data grouped by category.
         """
-        items_by_category = defaultdict(list)
+        items_by_category: dict[str, list[WoWItem]] = defaultdict(list)
         total_item_rows = self._count_csv_rows(table_paths["ItemSparse"])
 
         with Progress(
