@@ -41,12 +41,19 @@ class ItemClass(Enum):
     REAGENT = 5
     PROJECTILE = 6
     TRADESKILL = 7
+    ITEM_ENHANCEMENT = 8
     RECIPE = 9
+    MONEY_OBSOLETE = 10
     QUIVER = 11
     QUEST = 12
     KEY = 13
+    PERMANENT_OBSOLETE = 14
     MISCELLANEOUS = 15
     GLYPH = 16
+    BATTLE_PETS = 17
+    WOW_TOKEN = 18
+    PROFESSION = 19
+    HOUSING = 20
 
 
 class ItemSubClass(IntEnum):
@@ -73,10 +80,18 @@ class ItemSubClass(IntEnum):
     POLEARM = 6
     SWORD_1H = 7
     SWORD_2H = 8
+    WARGLAIVES = 9
     STAFF = 10
+    BEAR_CLAWS = 11
+    CAT_CLAWS = 12
+    FIST_WEAPONS = 13
+    MISCELLANEOUS = 14
     DAGGER = 15
+    THROWN = 16
+    SPEAR = 17
     CROSSBOW = 18
     WAND = 19
+    FISHING_POLE = 20
 
     # Armor (Class 4)
     CLOTH = 1
