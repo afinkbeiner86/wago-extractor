@@ -250,17 +250,11 @@ class WagoExtractor:
             is_match = False
             key_upper = category_key.upper().replace("-", "_")
 
-            # 1. Semantic Overrides
+            # 1. Semantic Overrides (excluding potions which are now subclass-based)
             if category_key == "food" and "Food" in spell_category:
                 is_match = True
             elif category_key == "drinks" and "Drink" in spell_category:
                 is_match = True
-            elif category_key == "potions":
-                if (
-                    class_id == ItemClass.CONSUMABLE.value
-                    and subclass_id == ItemSubClass.POTION.value
-                ):
-                    is_match = True
 
             # 2. Dynamic Match against ItemClass
             elif key_upper in ItemClass.__members__:
@@ -286,7 +280,7 @@ class WagoExtractor:
             elif (
                 category_key in CATEGORY_MAP
                 and class_id == CATEGORY_MAP[category_key].value
-                and category_key not in ["food", "drinks", "potions"]
+                and category_key not in ["food", "drinks"]
             ):
                 is_match = True
 
