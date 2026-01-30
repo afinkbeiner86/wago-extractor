@@ -14,7 +14,7 @@ The utility performs an in-memory relational join across disparate game data sch
 
 1. **Ingestion**: Stream-buffered retrieval of CSV datasets from the `wago.tools` API.
 2. **Denormalization**: Multi-stage hash joins:
-    * `ItemSparse` (Primary) <$\leftrightarrow$> `Item` (Class Definitions)
+    * `ItemSparse` (Primary) $\leftrightarrow$ `Item` (Class Definitions)
     * `Item` $\leftrightarrow$ `ItemXItemEffect` $\leftrightarrow$ `ItemEffect` $\leftrightarrow$ `SpellCategory`
 3. **Filtering**: Predicate-based extraction on `ClassID`, `SubclassID`, and semantic matching on `SpellCategoryID`.
 4. **Serialization**: Exports to RFC 4180 CSV or Lua table structures.
