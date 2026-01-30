@@ -34,7 +34,7 @@ class SmartProgressColumn(ProgressColumn):
     """Dynamic renderer for progress tracking supporting indeterminate states."""
 
     def render(self, task: Task) -> Text:
-        """Renders either absolute row counts or completion percentage.
+        """Renders row counts for indeterminate tasks or percentage for completions.
 
         Args:
             task: The current Rich Task instance.
@@ -96,6 +96,7 @@ class WagoExtractor:
         Args:
             target_categories: List of identifiers to extract (e.g., 'potions').
             export_lua: Toggle for generating a consolidated Lua module.
+            split_lua: Toggle for creating individual .lua files per category.
         """
         start_time = time.time()
         console.print(
@@ -190,16 +191,13 @@ class WagoExtractor:
     ) -> tuple[dict, dict]:
         """Constructs in-memory lookup indices for O(1) relational joins.
 
-        This method denormalizes the chain:
-        Item -> ItemXItemEffect -> ItemEffect -> SpellCategory.
-
         Args:
             table_paths: Mapping of raw CSV locations.
             progress: Progress context manager instance.
             task_id: Rich task ID for the indexing phase.
 
         Returns:
-            Tuple containing metadata and spell category mappings.
+            Tuple containing item metadata and spell category mappings.
         """
         item_metadata = {int(row["ID"]): row for row in self._read_csv(table_paths["Item"])}
         progress.update(task_id, advance=1)
@@ -236,11 +234,11 @@ class WagoExtractor:
         targets: list[str],
         results: dict,
     ) -> None:
-        """Applies dynamic filtering to group items into requested categories.
+        """Filters and groups items into requested categories with context enforcement.
 
         Args:
-            sparse_row: Row from ItemSparse.
-            meta_row: Row from Item (relational metadata).
+            sparse_row: Row dictionary from ItemSparse.
+            meta_row: Row dictionary from Item (relational metadata).
             spell_category: Resolved spell category name.
             targets: List of category keys requested by the user.
             results: Accumulator dictionary for filtered WoWItem objects.
@@ -274,7 +272,7 @@ class WagoExtractor:
                 target_subclass_id = ItemSubClass[key_upper].value
 
                 if subclass_id == target_subclass_id:
-                    # Specific Context Enforcement:
+                    # Specific Context Enforcement for overloaded IDs
                     if key_upper in ["POTION", "ELIXIR", "FLASK", "FOOD_AND_DRINK"]:
                         if class_id == ItemClass.CONSUMABLE.value:
                             is_match = True
@@ -282,7 +280,6 @@ class WagoExtractor:
                         if class_id == ItemClass.ARMOR.value:
                             is_match = True
                     elif class_id == ItemClass.WEAPON.value:
-                        # Weapons sub-classes are generally unique (Axe, Mace, etc)
                         is_match = True
 
             # 4. Fallback to CATEGORY_MAP
@@ -309,6 +306,7 @@ class WagoExtractor:
         Args:
             items_map: Grouped extraction results.
             exported_lua: Flag indicating if Lua artifacts were generated.
+            split_lua: Flag indicating if Lua artifacts were split.
             elapsed_time: Execution duration in seconds.
         """
         summary_table = Table(show_header=True, header_style="bold magenta")
@@ -336,13 +334,13 @@ class WagoExtractor:
             file_path: Path to the CSV file.
 
         Returns:
-            Number of rows excluding header.
+            Number of rows excluding the header.
         """
         with open(file_path, "rb") as f:
             return sum(1 for _ in f) - 1
 
     def _read_csv(self, file_path: Path) -> Generator[dict[str, Any], None, None]:
-        """Generator for reading CSV rows as dictionaries.
+        """Reads CSV rows as dictionaries via generator.
 
         Args:
             file_path: Path to the CSV file.
@@ -354,7 +352,7 @@ class WagoExtractor:
             yield from csv.DictReader(f)
 
     def _download_table_rich(self, table_name: str, progress_bar: Progress, task_id: Any) -> Path:
-        """Downloads a single DB2 table from wago.tools with progress tracking.
+        """Downloads a DB2 table with progress tracking.
 
         Args:
             table_name: Name of the DB2 table.
@@ -379,7 +377,7 @@ class WagoExtractor:
         return local_path
 
     def _export_csv(self, items: list[WoWItem], category_name: str) -> None:
-        """Exports a list of WoWItem objects to a CSV file.
+        """Exports WoWItem objects to a CSV file.
 
         Args:
             items: List of items to export.
@@ -398,11 +396,11 @@ class WagoExtractor:
             writer.writerows([item.to_dict() for item in sorted_items])
 
     def _export_lua(self, category_data: dict[str, list[WoWItem]], split_lua: bool = False) -> None:
-        """Exports extracted data as a Lua table for WoW Addon use.
+        """Exports data as a Lua table for WoW Addons.
 
         Args:
             category_data: Filtered items grouped by category.
-            split_lua: Whether to create individual .lua files per category.
+            split_lua: Toggle for individual .lua files per category.
         """
         merged_lines = [f"{self.addon_namespace} = {self.addon_namespace} or {{}}"]
 
