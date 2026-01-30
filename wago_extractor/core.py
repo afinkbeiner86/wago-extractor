@@ -85,7 +85,12 @@ class WagoExtractor:
         self.addon_namespace = addon_namespace
         logging.basicConfig(level=logging.ERROR)
 
-    def run(self, target_categories: list[str], export_lua: bool = False) -> None:
+    def run(
+        self,
+        target_categories: list[str],
+        export_lua: bool = False,
+        split_lua: bool = False,
+    ) -> None:
         """Executes the end-to-end extraction pipeline.
 
         Args:
@@ -107,9 +112,9 @@ class WagoExtractor:
             self._export_csv(items, category_name)
 
         if export_lua:
-            self._export_lua(items_by_category)
+            self._export_lua(items_by_category, split_lua=split_lua)
 
-        self._display_summary(items_by_category, export_lua, time.time() - start_time)
+        self._display_summary(items_by_category, export_lua, split_lua, time.time() - start_time)
 
     def _fetch_raw_data(self) -> dict[str, Path]:
         """Orchestrates stream-buffered ingestion of required datasets.
@@ -212,7 +217,6 @@ class WagoExtractor:
         }
         progress.update(task_id, advance=1)
 
-        # Build the final association between items and their human-readable spell groups
         item_to_category_name = {}
         for row in self._read_csv(table_paths["ItemXItemEffect"]):
             item_id = int(row["ItemID"])
@@ -232,23 +236,23 @@ class WagoExtractor:
         targets: list[str],
         results: dict,
     ) -> None:
-        """Applies domain-specific filtering logic to categorize items.
+        """Applies dynamic filtering to group items into requested categories.
 
         Args:
-            sparse_row: Localized item data (ItemSparse).
-            meta_row: Technical item data (Item).
+            sparse_row: Row from ItemSparse.
+            meta_row: Row from Item (relational metadata).
             spell_category: Resolved spell category name.
-            targets: Filter predicates to evaluate.
-            results: Accumulator for matched items.
+            targets: List of category keys requested by the user.
+            results: Accumulator dictionary for filtered WoWItem objects.
         """
         class_id = int(meta_row["ClassID"])
         subclass_id = int(meta_row["SubclassID"])
 
         for category_key in targets:
             is_match = False
+            key_upper = category_key.upper().replace("-", "_")
 
-            # Consumables like Food/Drink are identified by joining on SpellCategory string data,
-            # whereas Potions are identified via Class/Subclass Enums.
+            # 1. Semantic Overrides
             if category_key == "food" and "Food" in spell_category:
                 is_match = True
             elif category_key == "drinks" and "Drink" in spell_category:
@@ -259,19 +263,47 @@ class WagoExtractor:
                     and subclass_id == ItemSubClass.POTION.value
                 ):
                     is_match = True
+
+            # 2. Dynamic Match against ItemClass
+            elif key_upper in ItemClass.__members__:
+                if class_id == ItemClass[key_upper].value:
+                    is_match = True
+
+            # 3. Dynamic Match against ItemSubClass with STRICT context
+            elif key_upper in ItemSubClass.__members__:
+                target_subclass_id = ItemSubClass[key_upper].value
+
+                if subclass_id == target_subclass_id:
+                    # Specific Context Enforcement:
+                    if key_upper in ["POTION", "ELIXIR", "FLASK", "FOOD_AND_DRINK"]:
+                        if class_id == ItemClass.CONSUMABLE.value:
+                            is_match = True
+                    elif key_upper in ["CLOTH", "LEATHER", "MAIL", "PLATE", "SHIELD"]:
+                        if class_id == ItemClass.ARMOR.value:
+                            is_match = True
+                    elif class_id == ItemClass.WEAPON.value:
+                        # Weapons sub-classes are generally unique (Axe, Mace, etc)
+                        is_match = True
+
+            # 4. Fallback to CATEGORY_MAP
             elif (
-                CATEGORY_MAP.get(category_key)
+                category_key in CATEGORY_MAP
                 and class_id == CATEGORY_MAP[category_key].value
                 and category_key not in ["food", "drinks", "potions"]
             ):
                 is_match = True
 
             if is_match:
-                results[category_key].append(
-                    WoWItem.from_rows(sparse_row, meta_row, spell_category)
-                )
+                try:
+                    results[category_key].append(
+                        WoWItem.from_rows(sparse_row, meta_row, spell_category)
+                    )
+                except ValueError:
+                    continue
 
-    def _display_summary(self, items_map: dict, exported_lua: bool, elapsed_time: float) -> None:
+    def _display_summary(
+        self, items_map: dict, exported_lua: bool, split_lua: bool, elapsed_time: float
+    ) -> None:
         """Renders a tabular summary of extraction results.
 
         Args:
@@ -286,47 +318,51 @@ class WagoExtractor:
 
         for category_name, items in items_map.items():
             summary_table.add_row("CSV Data", f"{category_name}.csv", str(len(items)))
+            if exported_lua and split_lua:
+                summary_table.add_row(
+                    "Lua Module", f"{category_name}.lua", "[green]Extracted[/green]"
+                )
 
-        if exported_lua:
+        if exported_lua and not split_lua:
             summary_table.add_row("Lua Module", "data.lua", "[green]Merged[/green]")
 
         console.print(summary_table)
         console.print(f"\n[bold green]✨ Done![/bold green] [white]{elapsed_time:.2f}s[/white]\n")
 
     def _count_csv_rows(self, file_path: Path) -> int:
-        """Returns the number of records in a CSV excluding the header.
+        """Counts rows in a CSV file efficiently.
 
         Args:
-            file_path: Target CSV file.
+            file_path: Path to the CSV file.
 
         Returns:
-            Integer row count.
+            Number of rows excluding header.
         """
         with open(file_path, "rb") as f:
             return sum(1 for _ in f) - 1
 
     def _read_csv(self, file_path: Path) -> Generator[dict[str, Any], None, None]:
-        """Generator yielding parsed CSV rows as dictionaries.
+        """Generator for reading CSV rows as dictionaries.
 
         Args:
-            file_path: Target CSV file.
+            file_path: Path to the CSV file.
 
         Yields:
-            A dictionary representation of the current row.
+            Dictionary representing a CSV row.
         """
         with open(file_path, encoding="utf-8") as f:
             yield from csv.DictReader(f)
 
     def _download_table_rich(self, table_name: str, progress_bar: Progress, task_id: Any) -> Path:
-        """Streams a remote CSV to disk with progress tracking.
+        """Downloads a single DB2 table from wago.tools with progress tracking.
 
         Args:
-            table_name: Identifier for the remote DB2 table.
-            progress_bar: Active Progress instance.
-            task_id: Task ID for visual updates.
+            table_name: Name of the DB2 table.
+            progress_bar: Rich Progress instance.
+            task_id: ID of the progress task.
 
         Returns:
-            Path to the cached local file.
+            Path to the downloaded file.
         """
         local_path = self.raw_dir / f"{table_name}.csv"
         url = f"{self.BASE_URL}/{table_name}/csv"
@@ -343,11 +379,11 @@ class WagoExtractor:
         return local_path
 
     def _export_csv(self, items: list[WoWItem], category_name: str) -> None:
-        """Persists extracted items to an RFC 4180 compliant CSV.
+        """Exports a list of WoWItem objects to a CSV file.
 
         Args:
-            items: List of objects to serialize.
-            category_name: Target filename base.
+            items: List of items to export.
+            category_name: Filename prefix.
         """
         if not items:
             return
@@ -361,16 +397,21 @@ class WagoExtractor:
             writer.writeheader()
             writer.writerows([item.to_dict() for item in sorted_items])
 
-    def _export_lua(self, category_data: dict[str, list[WoWItem]]) -> None:
-        """Serializes extracted data into a nested Lua table structure.
+    def _export_lua(self, category_data: dict[str, list[WoWItem]], split_lua: bool = False) -> None:
+        """Exports extracted data as a Lua table for WoW Addon use.
 
         Args:
-            category_data: Grouped results to convert to Lua.
+            category_data: Filtered items grouped by category.
+            split_lua: Whether to create individual .lua files per category.
         """
-        lua_lines = [f"{self.addon_namespace} = {self.addon_namespace} or {{}}"]
+        merged_lines = [f"{self.addon_namespace} = {self.addon_namespace} or {{}}"]
 
         for category_name, items in category_data.items():
-            lua_lines.append(f"{self.addon_namespace}.{category_name.upper()} = {{")
+            category_lines = []
+            if split_lua:
+                category_lines.append(f"{self.addon_namespace} = {self.addon_namespace} or {{}}")
+
+            category_lines.append(f"{self.addon_namespace}.{category_name.upper()} = {{")
 
             items_by_expansion = defaultdict(list)
             for item in items:
@@ -378,13 +419,20 @@ class WagoExtractor:
 
             for expansion_id in sorted(items_by_expansion.keys()):
                 expansion_name = Expansion.get_name(expansion_id)
-                lua_lines.append(f"   [{expansion_id}] = {{ -- {expansion_name}")
+                category_lines.append(f"   [{expansion_id}] = {{ -- {expansion_name}")
 
-                sorted_exp_items = sorted(items_by_expansion[expansion_id], key=lambda i: i.id)
-                for item in sorted_exp_items:
-                    lua_lines.append(f'     [{item.id}] = "{item.name}",')
+                for item in sorted(items_by_expansion[expansion_id], key=lambda i: i.id):
+                    category_lines.append(f'     [{item.id}] = "{item.name}",')
 
-                lua_lines.append("   },")
-            lua_lines.append("}\n")
+                category_lines.append("   },")
+            category_lines.append("}\n")
 
-        (self.output_dir / "data.lua").write_text("\n".join(lua_lines), encoding="utf-8")
+            if split_lua:
+                (self.output_dir / f"{category_name}.lua").write_text(
+                    "\n".join(category_lines), encoding="utf-8"
+                )
+            else:
+                merged_lines.extend(category_lines)
+
+        if not split_lua:
+            (self.output_dir / "data.lua").write_text("\n".join(merged_lines), encoding="utf-8")
