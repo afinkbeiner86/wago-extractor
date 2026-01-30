@@ -54,9 +54,8 @@ dmypy.json
 .ruff_cache/
 
 # Data files
-data/raw/*.csv
-data/processed/*.csv
-*.db
+data/raw/
+data/processed/
 
 # Logs
 *.log
