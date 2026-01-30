@@ -4,32 +4,50 @@ ETL utility for denormalizing and extracting World of Warcraft DB2 data via Wago
 
 ## Purpose
 
-This utility was developed specifically to streamline the workflow for World of Warcraft addon development. By programmatically fetching, joining, and converting raw Blizzard game data into accessible formats (CSV and Lua), it eliminates the manual overhead of parsing DB2 files. The output is optimized for direct inclusion into Lua-based addons.
+This utility streamlines the workflow for World of Warcraft addon development by programmatically fetching, joining, and converting raw Blizzard game data into optimized CSV and Lua formats. It eliminates the manual overhead of parsing DB2 files and provides filtered datasets ready for direct integration into Lua-based projects.
 
 ## Technical Architecture
 
-The utility performs an in-memory relational join across disparate game data schemas to produce filtered datasets for downstream consumption.
+The utility performs an in-memory relational join across disparate game data schemas to produce denormalized datasets.
 
 ### Pipeline Stages
 
-1. **Ingestion**: Stream-buffered retrieval of CSV datasets from the `wago.tools` DB2 API.
-
+1. **Ingestion**: Stream-buffered retrieval of CSV datasets from the `wago.tools` API.
 2. **Denormalization**: Multi-stage hash joins:
-
-   * `ItemSparse` (Primary) ↔ `Item` (Class Definitions)
-
-   * `Item` ↔ `ItemXItemEffect` ↔ `ItemEffect` ↔ `SpellCategory`
-
-3. **Filtering**: Predicate-based extraction on `ClassID`, `SubclassID`, and joining on `SpellCategoryID`.
-
+    * `ItemSparse` (Primary) <$\leftrightarrow$> `Item` (Class Definitions)
+    * `Item` $\leftrightarrow$ `ItemXItemEffect` $\leftrightarrow$ `ItemEffect` $\leftrightarrow$ `SpellCategory`
+3. **Filtering**: Predicate-based extraction on `ClassID`, `SubclassID`, and semantic matching on `SpellCategoryID`.
 4. **Serialization**: Exports to RFC 4180 CSV or Lua table structures.
 
 ## Setup
 
-Target environment: **Python 3.10+**.
-Dependency management: [uv](https://github.com/astral-sh/uv).
+**Environment**: Python 3.10+  
+**Package Manager**: [uv](https://github.com/astral-sh/uv)
 
-```bash
+```powershell
 git clone <repository-url>
 cd wago-extractor
 uv sync --all-extras
+```
+
+## Usage
+
+The utility is invoked via the `wago-extract` entry point. Use the `-c` or `--categories` flag to specify target datasets.
+
+### PowerShell
+
+```powershell
+# Extract specific categories to CSV (default)
+uv run wago-extract -c potions food drinks
+
+# Extract weapons and armor with Lua serialization
+uv run wago-extract -c weapon armor --lua --split-lua
+```
+
+## Development
+
+**Testing**:  
+Run `uv run pytest` to execute the unit test suite.
+
+**Linting**:  
+Use `uv run ruff check .` for static analysis.
