@@ -114,19 +114,6 @@ class ItemQuality(Enum):
     HEIRLOOM = 7
 
 
-CATEGORY_MAP = {
-    "consumable": ItemClass.CONSUMABLE,
-    "weapon": ItemClass.WEAPON,
-    "armor": ItemClass.ARMOR,
-    "gem": ItemClass.GEM,
-    "reagent": ItemClass.REAGENT,
-    "glyph": ItemClass.GLYPH,
-    "food": ItemClass.CONSUMABLE,
-    "drinks": ItemClass.CONSUMABLE,
-    "potions": ItemClass.CONSUMABLE,
-}
-
-
 @dataclass
 class WoWItem:
     """Represents a fully merged item (Metadata + Details)"""
