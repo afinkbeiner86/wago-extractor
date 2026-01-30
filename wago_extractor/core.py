@@ -25,7 +25,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from .models import CATEGORY_MAP, Expansion, ItemClass, ItemSubClass, WoWItem
+from .models import Expansion, ItemClass, ItemSubClass, WoWItem
 
 console = Console()
 
@@ -44,8 +44,8 @@ class SmartProgressColumn(ProgressColumn):
         """
         if task.total is None:
             return Text(f"{int(task.completed):,} rows", style="blue")
-        percent = task.percentage if task.percentage is not None else 0
-        return Text(f"{percent:>3.0f}%", style="green")
+        completion_percentage = task.percentage if task.percentage is not None else 0
+        return Text(f"{completion_percentage:>3.0f}%", style="green")
 
 
 class WagoExtractor:
@@ -78,10 +78,10 @@ class WagoExtractor:
             raw_dir: Cache directory for ingested upstream CSVs.
             addon_namespace: Target global table for Lua serialization.
         """
-        self.output_dir = Path(output_dir)
-        self.raw_dir = Path(raw_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self.output_directory = Path(output_dir)
+        self.raw_directory = Path(raw_dir)
+        self.output_directory.mkdir(parents=True, exist_ok=True)
+        self.raw_directory.mkdir(parents=True, exist_ok=True)
         self.addon_namespace = addon_namespace
         logging.basicConfig(level=logging.ERROR)
 
@@ -98,24 +98,27 @@ class WagoExtractor:
             export_lua: Toggle for generating a consolidated Lua module.
             split_lua: Toggle for creating individual .lua files per category.
         """
-        start_time = time.time()
+        start_timestamp = time.time()
         console.print(
             Panel.fit("[bold blue]Wago WoW Data Extractor[/bold blue]", border_style="blue")
         )
 
-        table_paths = self._fetch_raw_data()
+        downloaded_table_paths = self._fetch_raw_data()
 
         console.print("\n[bold]2. Processing Relational Data[/bold]")
-        items_by_category = self._process_data(table_paths, target_categories)
+        extracted_items_by_category = self._process_data(downloaded_table_paths, target_categories)
 
-        console.print(f"\n[bold]3. Saving to [green]{self.output_dir}[/green][/bold]")
-        for category_name, items in items_by_category.items():
-            self._export_csv(items, category_name)
+        console.print(f"\n[bold]3. Saving to [green]{self.output_directory}[/green][/bold]")
+        for category_name, item_list in extracted_items_by_category.items():
+            self._export_to_csv(item_list, category_name)
 
         if export_lua:
-            self._export_lua(items_by_category, split_lua=split_lua)
+            self._export_to_lua(extracted_items_by_category, split_lua=split_lua)
 
-        self._display_summary(items_by_category, export_lua, split_lua, time.time() - start_time)
+        execution_duration = time.time() - start_timestamp
+        self._display_summary(
+            extracted_items_by_category, export_lua, split_lua, execution_duration
+        )
 
     def _fetch_raw_data(self) -> dict[str, Path]:
         """Orchestrates stream-buffered ingestion of required datasets.
@@ -123,8 +126,10 @@ class WagoExtractor:
         Returns:
             Mapping of table names to local filesystem paths.
         """
-        console.print(f"\n[bold]1. Downloading tables to [green]{self.raw_dir}[/green][/bold]")
-        paths = {}
+        console.print(
+            f"\n[bold]1. Downloading tables to [green]{self.raw_directory}[/green][/bold]"
+        )
+        table_path_map = {}
         with Progress(
             TextColumn("  [blue]{task.description:25}"),
             BarColumn(bar_width=40, style="grey37", complete_style="slate_blue1"),
@@ -132,11 +137,13 @@ class WagoExtractor:
             DownloadColumn(),
             TransferSpeedColumn(),
             console=console,
-        ) as progress:
+        ) as progress_context:
             for table_name in self.REQUIRED_TABLES:
-                task_id = progress.add_task(f"Fetching {table_name}", total=None)
-                paths[table_name] = self._download_table_rich(table_name, progress, task_id)
-        return paths
+                task_id = progress_context.add_task(f"Fetching {table_name}", total=None)
+                table_path_map[table_name] = self._download_table_with_progress(
+                    table_name, progress_context, task_id
+                )
+        return table_path_map
 
     def _process_data(
         self, table_paths: dict[str, Path], target_categories: list[str]
@@ -150,8 +157,8 @@ class WagoExtractor:
         Returns:
             Denormalized item data grouped by category.
         """
-        items_map = defaultdict(list)
-        total_rows = self._count_csv_rows(table_paths["ItemSparse"])
+        items_by_category = defaultdict(list)
+        total_item_rows = self._count_csv_rows(table_paths["ItemSparse"])
 
         with Progress(
             SpinnerColumn(spinner_name="dots", style="blue"),
@@ -160,149 +167,142 @@ class WagoExtractor:
             SmartProgressColumn(),
             console=console,
             transient=True,
-        ) as progress:
-            indexing_task = progress.add_task("Indexing & Joining", total=4)
-            item_metadata, item_to_spell_category = self._build_relation_maps(
-                table_paths, progress, indexing_task
+        ) as progress_context:
+            indexing_task = progress_context.add_task("Indexing & Joining", total=4)
+            item_metadata_map, item_to_spell_category_map = self._build_relational_indices(
+                table_paths, progress_context, indexing_task
             )
 
-            filtering_task = progress.add_task("Filtering Items", total=total_rows)
-            for row in self._read_csv(table_paths["ItemSparse"]):
-                item_id = int(row["ID"])
-                if item_id in item_metadata:
-                    metadata = item_metadata[item_id]
-                    spell_category_name = item_to_spell_category.get(item_id, "")
+            filtering_task = progress_context.add_task("Filtering Items", total=total_item_rows)
+            for row_data in self._read_csv_generator(table_paths["ItemSparse"]):
+                self._evaluate_and_map_row(
+                    row_data,
+                    item_metadata_map,
+                    item_to_spell_category_map,
+                    target_categories,
+                    items_by_category,
+                )
+                progress_context.update(filtering_task, advance=1)
 
-                    self._filter_and_map_item(
-                        row, metadata, spell_category_name, target_categories, items_map
-                    )
+        self._print_completion_bar("Indexing & Joining")
+        self._print_completion_bar("Filtering Items")
 
-                progress.update(filtering_task, advance=1)
+        return items_by_category
 
-        bar_visual = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        for label in ["Indexing & Joining", "Filtering Items"]:
-            msg = f"  [blue]{label:20}[/blue][slate_blue1]{bar_visual}[/slate_blue1] [green]100%"
-            console.print(msg)
+    def _evaluate_and_map_row(
+        self,
+        row_data: dict,
+        item_metadata: dict,
+        spell_category_map: dict,
+        targets: list[str],
+        results_accumulator: dict,
+    ) -> None:
+        """Helper to evaluate a single row against target categories."""
+        item_id = int(row_data["ID"])
+        if item_id in item_metadata:
+            metadata_row = item_metadata[item_id]
+            spell_category_name = spell_category_map.get(item_id, "")
+            self._apply_category_filters(
+                row_data, metadata_row, spell_category_name, targets, results_accumulator
+            )
 
-        return items_map
+    def _print_completion_bar(self, label: str) -> None:
+        """Renders a static 100% progress bar for completed transient tasks."""
+        bar_string = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        console.print(
+            f"  [blue]{label:20}[/blue][slate_blue1]{bar_string}[/slate_blue1] [green]100%"
+        )
 
-    def _build_relation_maps(
-        self, table_paths: dict[str, Path], progress: Progress, task_id: Any
+    def _build_relational_indices(
+        self, table_paths: dict[str, Path], progress_tracker: Progress, task_id: Any
     ) -> tuple[dict, dict]:
-        """Constructs in-memory lookup indices for O(1) relational joins.
-
-        Args:
-            table_paths: Mapping of raw CSV locations.
-            progress: Progress context manager instance.
-            task_id: Rich task ID for the indexing phase.
+        """Constructs in-memory lookup indices for relational joins.
 
         Returns:
-            Tuple containing item metadata and spell category mappings.
+            Tuple of (Item Metadata Map, Item ID to Spell Category Map).
         """
-        item_metadata = {int(row["ID"]): row for row in self._read_csv(table_paths["Item"])}
-        progress.update(task_id, advance=1)
+        item_metadata = {
+            int(row["ID"]): row for row in self._read_csv_generator(table_paths["Item"])
+        }
+        progress_tracker.update(task_id, advance=1)
 
-        effect_to_spell_category_id = {
+        effect_to_spell_cat_id = {
             int(row["ID"]): int(row["SpellCategoryID"])
-            for row in self._read_csv(table_paths["ItemEffect"])
+            for row in self._read_csv_generator(table_paths["ItemEffect"])
             if row.get("SpellCategoryID")
         }
-        progress.update(task_id, advance=1)
+        progress_tracker.update(task_id, advance=1)
 
         spell_category_names = {
             int(row["ID"]): row.get("Name_lang", "")
-            for row in self._read_csv(table_paths["SpellCategory"])
+            for row in self._read_csv_generator(table_paths["SpellCategory"])
         }
-        progress.update(task_id, advance=1)
+        progress_tracker.update(task_id, advance=1)
 
         item_to_category_name = {}
-        for row in self._read_csv(table_paths["ItemXItemEffect"]):
-            item_id = int(row["ItemID"])
+        for row in self._read_csv_generator(table_paths["ItemXItemEffect"]):
             effect_id = int(row["ItemEffectID"])
-            spell_cat_id = effect_to_spell_category_id.get(effect_id)
-            if spell_cat_id:
-                item_to_category_name[item_id] = spell_category_names.get(spell_cat_id, "")
-        progress.update(task_id, advance=1)
+            spell_category_id = effect_to_spell_cat_id.get(effect_id)
+            if spell_category_id:
+                item_to_category_name[int(row["ItemID"])] = spell_category_names.get(
+                    spell_category_id, ""
+                )
+        progress_tracker.update(task_id, advance=1)
 
         return item_metadata, item_to_category_name
 
-    def _filter_and_map_item(
+    def _apply_category_filters(
         self,
         sparse_row: dict,
-        meta_row: dict,
+        metadata_row: dict,
         spell_category: str,
-        targets: list[str],
+        target_categories: list[str],
         results: dict,
     ) -> None:
-        """Filters and groups items into requested categories with context enforcement.
+        """Matches items against requested categories and appends to results."""
+        class_id = int(metadata_row["ClassID"])
+        subclass_id = int(metadata_row["SubclassID"])
 
-        Args:
-            sparse_row: Row dictionary from ItemSparse.
-            meta_row: Row dictionary from Item (relational metadata).
-            spell_category: Resolved spell category name.
-            targets: List of category keys requested by the user.
-            results: Accumulator dictionary for filtered WoWItem objects.
-        """
-        class_id = int(meta_row["ClassID"])
-        subclass_id = int(meta_row["SubclassID"])
-
-        for category_key in targets:
-            is_match = False
-            key_upper = category_key.upper().replace("-", "_")
-
-            # 1. Semantic Overrides (excluding potions which are now subclass-based)
-            if category_key == "food" and "Food" in spell_category:
-                is_match = True
-            elif category_key == "drinks" and "Drink" in spell_category:
-                is_match = True
-
-            # 2. Dynamic Match against ItemClass
-            elif key_upper in ItemClass.__members__:
-                if class_id == ItemClass[key_upper].value:
-                    is_match = True
-
-            # 3. Dynamic Match against ItemSubClass with STRICT context
-            elif key_upper in ItemSubClass.__members__:
-                target_subclass_id = ItemSubClass[key_upper].value
-
-                if subclass_id == target_subclass_id:
-                    # Specific Context Enforcement for overloaded IDs
-                    if key_upper in ["POTION", "ELIXIR", "FLASK", "FOOD_AND_DRINK"]:
-                        if class_id == ItemClass.CONSUMABLE.value:
-                            is_match = True
-                    elif key_upper in ["CLOTH", "LEATHER", "MAIL", "PLATE", "SHIELD"]:
-                        if class_id == ItemClass.ARMOR.value:
-                            is_match = True
-                    elif class_id == ItemClass.WEAPON.value:
-                        is_match = True
-
-            # 4. Fallback to CATEGORY_MAP
-            elif (
-                category_key in CATEGORY_MAP
-                and class_id == CATEGORY_MAP[category_key].value
-                and category_key not in ["food", "drinks"]
-            ):
-                is_match = True
-
-            if is_match:
+        for category_key in target_categories:
+            if self._check_category_match(category_key, class_id, subclass_id, spell_category):
                 try:
-                    results[category_key].append(
-                        WoWItem.from_rows(sparse_row, meta_row, spell_category)
-                    )
+                    wow_item = WoWItem.from_rows(sparse_row, metadata_row, spell_category)
+                    results[category_key].append(wow_item)
                 except ValueError:
                     continue
 
-    def _display_summary(
-        self, items_map: dict, exported_lua: bool, split_lua: bool, elapsed_time: float
-    ) -> None:
-        """Renders a tabular summary of extraction results.
+    def _check_category_match(
+        self, category_key: str, class_id: int, subclass_id: int, spell_category: str
+    ) -> bool:
+        """Boolean check to see if IDs match the requested category logic."""
+        key_constant = category_key.upper().replace("-", "_")
 
-        Args:
-            items_map: Grouped extraction results.
-            exported_lua: Flag indicating if Lua artifacts were generated.
-            split_lua: Flag indicating if Lua artifacts were split.
-            elapsed_time: Execution duration in seconds.
-        """
+        if category_key == "food" and "Food" in spell_category:
+            return True
+        if category_key == "drinks" and "Drink" in spell_category:
+            return True
+
+        if key_constant in ItemClass.__members__:
+            return class_id == ItemClass[key_constant].value
+
+        if key_constant in ItemSubClass.__members__:
+            target_sub_id = ItemSubClass[key_constant].value
+            if subclass_id != target_sub_id:
+                return False
+
+            if key_constant in ["POTION", "ELIXIR", "FLASK", "FOOD_AND_DRINK"]:
+                return class_id == ItemClass.CONSUMABLE.value
+            if key_constant in ["CLOTH", "LEATHER", "MAIL", "PLATE", "SHIELD"]:
+                return class_id == ItemClass.ARMOR.value
+            if class_id == ItemClass.WEAPON.value:
+                return True
+
+        return False
+
+    def _display_summary(
+        self, items_map: dict, exported_lua: bool, split_lua: bool, duration: float
+    ) -> None:
+        """Renders a tabular summary of extraction results."""
         summary_table = Table(show_header=True, header_style="bold magenta")
         summary_table.add_column("File Type", style="dim")
         summary_table.add_column("Filename")
@@ -319,112 +319,91 @@ class WagoExtractor:
             summary_table.add_row("Lua Module", "data.lua", "[green]Merged[/green]")
 
         console.print(summary_table)
-        console.print(f"\n[bold green]✨ Done![/bold green] [white]{elapsed_time:.2f}s[/white]\n")
+        console.print(f"\n[bold green]✨ Done![/bold green] [white]{duration:.2f}s[/white]\n")
 
     def _count_csv_rows(self, file_path: Path) -> int:
-        """Counts rows in a CSV file efficiently.
+        """Counts rows in a CSV file efficiently."""
+        with open(file_path, "rb") as csv_file:
+            return sum(1 for _ in csv_file) - 1
 
-        Args:
-            file_path: Path to the CSV file.
+    def _read_csv_generator(self, file_path: Path) -> Generator[dict[str, Any], None, None]:
+        """Reads CSV rows as dictionaries via generator."""
+        with open(file_path, encoding="utf-8") as csv_file:
+            yield from csv.DictReader(csv_file)
 
-        Returns:
-            Number of rows excluding the header.
-        """
-        with open(file_path, "rb") as f:
-            return sum(1 for _ in f) - 1
+    def _download_table_with_progress(
+        self, table_name: str, progress_bar: Progress, task_id: Any
+    ) -> Path:
+        """Downloads a DB2 table with progress tracking."""
+        target_path = self.raw_directory / f"{table_name}.csv"
+        request_url = f"{self.BASE_URL}/{table_name}/csv"
+        http_response = requests.get(request_url, stream=True, timeout=60)
+        http_response.raise_for_status()
 
-    def _read_csv(self, file_path: Path) -> Generator[dict[str, Any], None, None]:
-        """Reads CSV rows as dictionaries via generator.
+        total_bytes = int(http_response.headers.get("content-length", 0))
+        progress_bar.update(task_id, total=total_bytes if total_bytes > 0 else None)
 
-        Args:
-            file_path: Path to the CSV file.
+        with open(target_path, "wb") as output_file:
+            for byte_chunk in http_response.iter_content(chunk_size=8192):
+                output_file.write(byte_chunk)
+                progress_bar.update(task_id, advance=len(byte_chunk))
+        return target_path
 
-        Yields:
-            Dictionary representing a CSV row.
-        """
-        with open(file_path, encoding="utf-8") as f:
-            yield from csv.DictReader(f)
-
-    def _download_table_rich(self, table_name: str, progress_bar: Progress, task_id: Any) -> Path:
-        """Downloads a DB2 table with progress tracking.
-
-        Args:
-            table_name: Name of the DB2 table.
-            progress_bar: Rich Progress instance.
-            task_id: ID of the progress task.
-
-        Returns:
-            Path to the downloaded file.
-        """
-        local_path = self.raw_dir / f"{table_name}.csv"
-        url = f"{self.BASE_URL}/{table_name}/csv"
-        response = requests.get(url, stream=True, timeout=60)
-        response.raise_for_status()
-
-        content_length = int(response.headers.get("content-length", 0))
-        progress_bar.update(task_id, total=content_length if content_length > 0 else None)
-
-        with open(local_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-                progress_bar.update(task_id, advance=len(chunk))
-        return local_path
-
-    def _export_csv(self, items: list[WoWItem], category_name: str) -> None:
-        """Exports WoWItem objects to a CSV file.
-
-        Args:
-            items: List of items to export.
-            category_name: Filename prefix.
-        """
-        if not items:
+    def _export_to_csv(self, item_list: list[WoWItem], category_name: str) -> None:
+        """Exports WoWItem objects to a CSV file."""
+        if not item_list:
             return
+        sorted_items = sorted(item_list, key=lambda item: item.id)
+        file_output_path = self.output_directory / f"{category_name}.csv"
+        with open(file_output_path, "w", newline="", encoding="utf-8") as csv_file:
+            csv_headers = list(sorted_items[0].to_dict().keys())
+            csv_writer = csv.DictWriter(csv_file, fieldnames=csv_headers)
+            csv_writer.writeheader()
+            csv_writer.writerows([item.to_dict() for item in sorted_items])
 
-        sorted_items = sorted(items, key=lambda item: item.id)
-        output_path = self.output_dir / f"{category_name}.csv"
-
-        with open(output_path, "w", newline="", encoding="utf-8") as f:
-            headers = list(sorted_items[0].to_dict().keys())
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            writer.writerows([item.to_dict() for item in sorted_items])
-
-    def _export_lua(self, category_data: dict[str, list[WoWItem]], split_lua: bool = False) -> None:
-        """Exports data as a Lua table for WoW Addons.
-
-        Args:
-            category_data: Filtered items grouped by category.
-            split_lua: Toggle for individual .lua files per category.
-        """
-        merged_lines = [f"{self.addon_namespace} = {self.addon_namespace} or {{}}"]
+    def _export_to_lua(
+        self, category_data: dict[str, list[WoWItem]], split_lua: bool = False
+    ) -> None:
+        """Exports data as a Lua table for WoW Addons."""
+        merged_lua_buffer = [f"{self.addon_namespace} = {self.addon_namespace} or {{}}"]
 
         for category_name, items in category_data.items():
-            category_lines = []
-            if split_lua:
-                category_lines.append(f"{self.addon_namespace} = {self.addon_namespace} or {{}}")
-
-            category_lines.append(f"{self.addon_namespace}.{category_name.upper()} = {{")
-
-            items_by_expansion = defaultdict(list)
-            for item in items:
-                items_by_expansion[int(item.expansion)].append(item)
-
-            for expansion_id in sorted(items_by_expansion.keys()):
-                expansion_name = Expansion.get_name(expansion_id)
-                category_lines.append(f"   [{expansion_id}] = {{ -- {expansion_name}")
-
-                for item in sorted(items_by_expansion[expansion_id], key=lambda i: i.id):
-                    category_lines.append(f'     [{item.id}] = "{item.name}",')
-
-                category_lines.append("   },")
-            category_lines.append("}\n")
+            category_lua_string = self._generate_category_lua_content(
+                category_name, items, include_header=split_lua
+            )
 
             if split_lua:
-                (self.output_dir / f"{category_name}.lua").write_text(
-                    "\n".join(category_lines), encoding="utf-8"
+                (self.output_directory / f"{category_name}.lua").write_text(
+                    category_lua_string, encoding="utf-8"
                 )
             else:
-                merged_lines.extend(category_lines)
+                merged_lua_buffer.append(category_lua_string)
 
         if not split_lua:
-            (self.output_dir / "data.lua").write_text("\n".join(merged_lines), encoding="utf-8")
+            (self.output_directory / "data.lua").write_text(
+                "\n".join(merged_lua_buffer), encoding="utf-8"
+            )
+
+    def _generate_category_lua_content(
+        self, category_name: str, items: list[WoWItem], include_header: bool
+    ) -> str:
+        """Generates the Lua string representation for a single category."""
+        lua_lines = []
+        if include_header:
+            lua_lines.append(f"{self.addon_namespace} = {self.addon_namespace} or {{}}")
+
+        lua_lines.append(f"{self.addon_namespace}.{category_name.upper()} = {{")
+
+        items_by_expansion = defaultdict(list)
+        for item in items:
+            items_by_expansion[int(item.expansion)].append(item)
+
+        for expansion_id in sorted(items_by_expansion.keys()):
+            expansion_label = Expansion.get_name(expansion_id)
+            lua_lines.append(f"   [{expansion_id}] = {{ -- {expansion_label}")
+            for item in sorted(items_by_expansion[expansion_id], key=lambda i: i.id):
+                lua_lines.append(f'     [{item.id}] = "{item.name}",')
+            lua_lines.append("   },")
+
+        lua_lines.append("}\n")
+        return "\n".join(lua_lines)
