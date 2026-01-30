@@ -49,6 +49,43 @@ class ItemClass(Enum):
     GLYPH = 16
 
 
+class ItemSubClass(IntEnum):
+    """
+    Commonly used SubClass IDs.
+    Note: SubClass IDs are context-dependent on the ItemClass.
+    """
+
+    # Consumables (Class 0)
+    POTION = 1
+    ELIXIR = 2
+    FLASK = 3
+    FOOD_AND_DRINK = 5
+    BANDAGE = 7
+    VANTUS_RUNES = 9
+
+    # Weapons (Class 2)
+    AXE_1H = 0
+    AXE_2H = 1
+    BOW = 2
+    GUN = 3
+    MACE_1H = 4
+    MACE_2H = 5
+    POLEARM = 6
+    SWORD_1H = 7
+    SWORD_2H = 8
+    STAFF = 10
+    DAGGER = 15
+    CROSSBOW = 18
+    WAND = 19
+
+    # Armor (Class 4)
+    CLOTH = 1
+    LEATHER = 2
+    MAIL = 3
+    PLATE = 4
+    SHIELD = 6
+
+
 class ItemQuality(Enum):
     """Item quality levels (rarity)"""
 
