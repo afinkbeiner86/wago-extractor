@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import textwrap
 
 from rich.console import Console
 from rich.table import Table
@@ -21,7 +22,6 @@ def list_categories() -> None:
 
     table.add_row("Semantic", "food", "-")
     table.add_row("Semantic", "drinks", "-")
-    table.add_row("Semantic", "potions", "-")
     table.add_section()
 
     for item_class in ItemClass:
@@ -34,91 +34,127 @@ def list_categories() -> None:
 
     console.print(table)
     console.print(
-        "\n[info]Use these with [bold]-c/--categories[/bold]. Semantic keys use custom spell logic.[/info]"
+        "\n[info]Use these with [bold]-c/--categories[/bold]. Plural/Singular is supported automatically.[/info]"
     )
+
+
+def _normalize_category_name(category_input: str) -> str:
+    """Standardizes user input to match internal Enum keys or semantic overrides.
+
+    This function handles common human-input variations such as trailing spaces,
+    casing differences, and pluralizations.
+
+    Args:
+        category_input: The raw string provided by the user via the CLI.
+
+    Returns:
+        A standardized string (e.g., "weapon", "food") compatible with core logic.
+    """
+    normalized_input = category_input.lower().strip().replace(" ", "_")
+
+    # Handle hardcoded semantic overrides
+    if normalized_input in ["drink", "drinks"]:
+        return "drinks"
+    if normalized_input in ["food", "foods"]:
+        return "food"
+
+    # Map all possible valid singular identifiers from our data models
+    # We combine Class and SubClass names for a single lookup set
+    valid_class_names = {item.name.lower() for item in ItemClass}
+    valid_subclass_names = {sub.name.lower() for sub in ItemSubClass}
+    all_valid_identifiers = valid_class_names | valid_subclass_names
+
+    if normalized_input in all_valid_identifiers:
+        return normalized_input
+
+    if normalized_input.endswith("s"):
+        singular_version = normalized_input[:-1]
+        if singular_version in all_valid_identifiers:
+            return singular_version
+
+    return normalized_input
 
 
 def main() -> None:
     """Parses command-line arguments and initializes the extraction pipeline."""
     parser = argparse.ArgumentParser(
-        description="Wago WoW Data Extractor: ETL for Blizzard DB2 data."
+        description="Wago WoW Data Extractor: ETL for Blizzard DB2 data.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+            Usage Examples:
+              # Plural and Singular support are handled automatically
+              python -m wago_extractor.cli -c weapons armors plates
+
+              # Mix and match identifiers
+              python -m wago_extractor.cli -c food potion "2h axe" --lua
+
+              # List all available identifiers
+              python -m wago_extractor.cli --list
+        """),
     )
 
-    # Path configurations
     parser.add_argument(
         "-o",
         "--output-dir",
         default="data/processed",
-        help="Target directory for processed artifacts.",
+        help="Target directory for the processed CSV/Lua files.",
     )
     parser.add_argument(
         "-r",
         "--raw-dir",
         default="data/raw",
-        help="Local cache directory for upstream CSV datasets.",
-    )
-
-    # Lua serialization options
-    parser.add_argument("-l", "--lua", action="store_true", help="Enable Lua module generation.")
-    parser.add_argument(
-        "-n", "--namespace", default="MyAddon", help="Global table identifier used in Lua output."
+        help="Local cache directory for raw upstream CSV datasets.",
     )
     parser.add_argument(
+        "--lua",
+        action="store_true",
+        help="Enable generation of Lua data tables for WoW Addons.",
+    )
+    parser.add_argument(
+        "-n",
+        "--namespace",
+        default="MyAddon",
+        help="The global table name used in the generated Lua output.",
+    )
+    parser.add_argument(
+        "-s",
         "--split-lua",
         action="store_true",
-        help="Save each category to a separate .lua file instead of merging.",
+        help="Save each category to an individual .lua file instead of a merged file.",
     )
-
-    # Discovery
     parser.add_argument(
+        "-l",
         "--list",
         action="store_true",
-        help="List all available categories and subclasses, then exit.",
+        help="List all valid category identifiers and exit.",
     )
-
-    # Dynamic Category filters
     parser.add_argument(
         "-c",
         "--categories",
         nargs="+",
-        help=(
-            "List of categories to extract. Supports semantic keys (food, drinks, potions), "
-            "Item Classes (e.g., WEAPON, ARMOR), or Sub-Classes (e.g., PLATE, AXE1H)."
-        ),
+        help="List of categories to extract (e.g., weapons, armor, potions).",
     )
-
-    # Legacy/Shortcut flags for convenience
-    parser.add_argument("--food", action="store_true", help="Shortcut for --categories food")
-    parser.add_argument("--drinks", action="store_true", help="Shortcut for --categories drinks")
-    parser.add_argument("--potions", action="store_true", help="Shortcut for --categories potions")
 
     args = parser.parse_args()
 
-    # Handle --list request
     if args.list:
         list_categories()
         sys.exit(0)
 
-    # Build predicate list from both dynamic list and shortcut flags
-    selected: set[str] = set()
-    if args.categories:
-        selected.update(c.lower() for c in args.categories)
+    if not args.categories:
+        console.print("[bold red]Error:[/bold red] No categories were selected for extraction.")
+        parser.print_help()
+        sys.exit(1)
 
-    if args.food:
-        selected.add("food")
-    if args.drinks:
-        selected.add("drinks")
-    if args.potions:
-        selected.add("potions")
-
-    # Default to standard consumables if no specific flags or categories are provided
-    final_selection = list(selected) if selected else ["food", "drinks", "potions"]
+    normalized_categories = {_normalize_category_name(category) for category in args.categories}
 
     extractor = WagoExtractor(
         output_dir=args.output_dir, raw_dir=args.raw_dir, addon_namespace=args.namespace
     )
 
-    extractor.run(target_categories=final_selection, export_lua=args.lua, split_lua=args.split_lua)
+    extractor.run(
+        target_categories=list(normalized_categories), export_lua=args.lua, split_lua=args.split_lua
+    )
 
 
 if __name__ == "__main__":
