@@ -42,6 +42,13 @@ class SmartProgressColumn(ProgressColumn):
 
 class WagoExtractor:
     BASE_URL = "https://wago.tools/db2"
+    REQUIRED_TABLES = [
+        "Item",
+        "ItemSparse",
+        "ItemXItemEffect",
+        "ItemEffect",
+        "SpellCategory",
+    ]
 
     def __init__(
         self,
@@ -56,24 +63,34 @@ class WagoExtractor:
         self.addon_namespace = addon_namespace
         logging.basicConfig(level=logging.ERROR)
 
-    def _count_csv_rows(self, path: Path) -> int:
-        with open(path, "rb") as f:
-            return sum(1 for _ in f) - 1
-
-    def _read_csv(self, path: Path) -> Generator[dict[str, Any], None, None]:
-        with open(path, encoding="utf-8") as f:
-            yield from csv.DictReader(f)
-
     def run(self, target_cats: list[str], export_lua: bool = False) -> None:
+        """Orchestrates the download, join, and export process."""
         start_time = time.time()
         console.print(
             Panel.fit("[bold blue]Wago WoW Data Extractor[/bold blue]", border_style="blue")
         )
 
-        console.print(f"\n[bold]1. Downloading to [green]{self.raw_dir}[/green][/bold]")
-        tables = ["Item", "ItemSparse", "ItemXItemEffect", "ItemEffect", "SpellCategory"]
-        paths = {}
+        # Step 1: Download
+        paths = self._fetch_raw_data()
 
+        # Step 2: Process
+        console.print("\n[bold]2. Processing Relational Data[/bold]")
+        items_map = self._process_data(paths, target_cats)
+
+        # Step 3: Export
+        console.print(f"\n[bold]3. Saving to [green]{self.output_dir}[/green][/bold]")
+        for cat, items in items_map.items():
+            self._export_csv(items, cat)
+
+        if export_lua:
+            self._export_lua(items_map)
+
+        self._display_summary(items_map, export_lua, time.time() - start_time)
+
+    def _fetch_raw_data(self) -> dict[str, Path]:
+        """Downloads required tables with progress bars."""
+        console.print(f"\n[bold]1. Downloading tables to [green]{self.raw_dir}[/green][/bold]")
+        paths = {}
         with Progress(
             TextColumn("  [blue]{task.description:25}"),
             BarColumn(bar_width=40, style="grey37", complete_style="slate_blue1"),
@@ -82,11 +99,15 @@ class WagoExtractor:
             TransferSpeedColumn(),
             console=console,
         ) as progress:
-            for name in tables:
+            for name in self.REQUIRED_TABLES:
                 tid = progress.add_task(f"Fetching {name}", total=None)
                 paths[name] = self._download_table_rich(name, progress, tid)
+        return paths
 
-        console.print("\n[bold]2. Processing Relational Data[/bold]")
+    def _process_data(
+        self, paths: dict[str, Path], target_cats: list[str]
+    ) -> dict[str, list[WoWItem]]:
+        """Handles the relational joining and filtering."""
         items_map = defaultdict(list)
         total_rows = self._count_csv_rows(paths["ItemSparse"])
 
@@ -98,77 +119,113 @@ class WagoExtractor:
             console=console,
             transient=True,
         ) as progress:
+            # Phase A: Indexing
             t_idx = progress.add_task("Indexing & Joining", total=4)
+            meta, item_to_spell_cat = self._build_relation_maps(paths, progress, t_idx)
 
-            meta = {int(r["ID"]): r for r in self._read_csv(paths["Item"])}
-            progress.update(t_idx, advance=1)
-
-            eff_scat = {
-                int(r["ID"]): int(r["SpellCategoryID"])
-                for r in self._read_csv(paths["ItemEffect"])
-                if r.get("SpellCategoryID")
-            }
-            progress.update(t_idx, advance=1)
-
-            scat_names = {
-                int(r["ID"]): r.get("Name_lang", "") for r in self._read_csv(paths["SpellCategory"])
-            }
-            progress.update(t_idx, advance=1)
-
-            item_to_cat = {}
-            for r in self._read_csv(paths["ItemXItemEffect"]):
-                i_id, e_id = int(r["ItemID"]), int(r["ItemEffectID"])
-                s_id = eff_scat.get(e_id)
-                if s_id:
-                    item_to_cat[i_id] = scat_names.get(s_id, "")
-            progress.update(t_idx, advance=1)
-
+            # Phase B: Filtering
             f_task = progress.add_task("Filtering Items", total=total_rows)
             for row in self._read_csv(paths["ItemSparse"]):
                 i_id = int(row["ID"])
                 if i_id in meta:
-                    m = meta[i_id]
-                    cid, scid, scat = (
-                        int(m["ClassID"]),
-                        int(m["SubclassID"]),
-                        item_to_cat.get(i_id, ""),
+                    item_data = meta[i_id]
+                    spell_cat_name = item_to_spell_cat.get(i_id, "")
+
+                    self._filter_and_map_item(
+                        row, item_data, spell_cat_name, target_cats, items_map
                     )
-                    for cat in target_cats:
-                        if (
-                            (cat == "food" and "Food" in scat)
-                            or (cat == "drinks" and "Drink" in scat)
-                            or (cat == "potions" and cid == 0 and scid == 1)
-                            or (
-                                CATEGORY_MAP.get(cat)
-                                and cid == CATEGORY_MAP[cat].value
-                                and cat not in ["food", "drinks", "potions"]
-                            )
-                        ):
-                            items_map[cat].append(WoWItem.from_rows(row, m, scat))
+
                 progress.update(f_task, advance=1)
 
+        # Print static completion bars
         bar = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         for label in ["Indexing & Joining", "Filtering Items"]:
             console.print(
                 f"  [blue]{label:25}[/blue][slate_blue1]{bar}[/slate_blue1] [green]100%[/green]"
             )
 
-        console.print(f"\n[bold]3. Saving to [green]{self.output_dir}[/green][/bold]")
+        return items_map
+
+    def _build_relation_maps(
+        self, paths: dict[str, Path], progress: Progress, task_id: Any
+    ) -> tuple[dict, dict]:
+        """Pre-indexes CSVs to allow O(1) lookups during the main loop."""
+        # Map Item ID -> Base Data (ClassID, SubclassID)
+        meta = {int(r["ID"]): r for r in self._read_csv(paths["Item"])}
+        progress.update(task_id, advance=1)
+
+        # Map Effect ID -> SpellCategory ID
+        eff_scat = {
+            int(r["ID"]): int(r["SpellCategoryID"])
+            for r in self._read_csv(paths["ItemEffect"])
+            if r.get("SpellCategoryID")
+        }
+        progress.update(task_id, advance=1)
+
+        # Map SpellCategory ID -> Name
+        scat_names = {
+            int(r["ID"]): r.get("Name_lang", "") for r in self._read_csv(paths["SpellCategory"])
+        }
+        progress.update(task_id, advance=1)
+
+        # Map Item ID -> SpellCategory Name
+        item_to_cat = {}
+        for r in self._read_csv(paths["ItemXItemEffect"]):
+            i_id, e_id = int(r["ItemID"]), int(r["ItemEffectID"])
+            s_id = eff_scat.get(e_id)
+            if s_id:
+                item_to_cat[i_id] = scat_names.get(s_id, "")
+        progress.update(task_id, advance=1)
+
+        return meta, item_to_cat
+
+    def _filter_and_map_item(
+        self, sparse_row: dict, meta_row: dict, spell_cat: str, targets: list[str], results: dict
+    ) -> None:
+        """Determines if an item meets criteria for the requested categories."""
+        cid = int(meta_row["ClassID"])
+        scid = int(meta_row["SubclassID"])
+
+        for cat in targets:
+            match = False
+            if cat == "food" and "Food" in spell_cat:
+                match = True
+            elif cat == "drinks" and "Drink" in spell_cat:
+                match = True
+            elif cat == "potions" and cid == 0 and scid == 1:
+                match = True
+            elif (
+                CATEGORY_MAP.get(cat)
+                and cid == CATEGORY_MAP[cat].value
+                and cat not in ["food", "drinks", "potions"]
+            ):
+                match = True
+
+            if match:
+                results[cat].append(WoWItem.from_rows(sparse_row, meta_row, spell_cat))
+
+    def _display_summary(self, items_map: dict, lua: bool, elapsed: float) -> None:
+        """Renders the final results table to the console."""
         summary = Table(show_header=True, header_style="bold magenta")
         summary.add_column("File Type", style="dim")
         summary.add_column("Filename")
         summary.add_column("Items", justify="right")
 
         for cat, items in items_map.items():
-            self._export_csv(items, cat)
             summary.add_row("CSV Data", f"{cat}.csv", str(len(items)))
-        if export_lua:
-            self._export_lua(items_map)
+        if lua:
             summary.add_row("Lua Module", "data.lua", "[green]Merged[/green]")
 
         console.print(summary)
-        elapsed = time.time() - start_time
         console.print(f"\n[bold green]✨ Done![/bold green] [white]{elapsed:.2f}s[/white]\n")
+
+    def _count_csv_rows(self, path: Path) -> int:
+        with open(path, "rb") as f:
+            return sum(1 for _ in f) - 1
+
+    def _read_csv(self, path: Path) -> Generator[dict[str, Any], None, None]:
+        with open(path, encoding="utf-8") as f:
+            yield from csv.DictReader(f)
 
     def _download_table_rich(self, name: str, progress: Progress, tid: Any) -> Path:
         p = self.raw_dir / f"{name}.csv"
